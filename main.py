@@ -1,89 +1,79 @@
-#STEP1 IMPORT LIBRARIES
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
-import pandas as pd
+from typing import Optional, List
 from datetime import datetime, timedelta
-import uvicorn
+import pandas as pd
 
+# =========================
+# FILE PATHS
+# =========================
 
-#STEP2 FILE PATH CONSTANTS
+CUSTOMER_FILE = "tragerinc_customer_info.csv"
+ENERGY_FILE = "tragerinc_energy_usage.csv"
+TICKET_FILE = "tragerinc_support_tickets.csv"
 
-CUSTOMER_FILE = r"C:\Users\User\Desktop\AMDARI\MLops\tragerinc_customer_info.csv"
+# =========================
+# LOAD CSV DATA
+# =========================
 
-ENERGY_FILE = r"C:\Users\User\Desktop\AMDARI\MLops\tragerinc_energy_usage.csv"
+customer_df = pd.read_csv(CUSTOMER_FILE, parse_dates=["Date_Joined"])
+energy_df = pd.read_csv(ENERGY_FILE, parse_dates=["Date"])
+ticket_df = pd.read_csv(TICKET_FILE, parse_dates=["Date_Opened", "Date_Closed"])
 
-TICKET_FILE = r"C:\Users\User\Desktop\AMDARI\MLops\tragerinc_support_tickets.csv"
-
-
-#STEP3 LOAD CSV FILES
-
-customer_info_df = pd.read_csv(
-    CUSTOMER_FILE,
-    parse_dates=["Date_Joined"]
-)
-
-energy_usage_df = pd.read_csv(
-    ENERGY_FILE,
-    parse_dates=["Date"]
-)
-
-customer_tickets_df = pd.read_csv(
-    TICKET_FILE,
-    parse_dates=["Date_Opened", "Date_Closed"]
-)
-
-
-#STEP4 INITIALISE FASTAPI
+# =========================
+# INITIALIZE FASTAPI APP
+# =========================
 
 app = FastAPI(
-    title="Trager Inc FastAPI",
-    version="1.0.0",
-    description="customer info, energy usage, and customer tickets API"
+    title="TragerInc Data Service",
+    version="1.0.0"
 )
 
-
-#STEP5 ROOT ENDPOINT
-
-@app.get(
-    "/",
-    tags=["Health Check"]
-)
-def home():
-
-    return {
-        "message": "Trager Inc API is running successfully"
-    }
-
-
-#STEP6 BUILDING PYDANTIC MODELS
+# =========================
+# PYDANTIC MODELS
+# =========================
 
 class Customer(BaseModel):
-
     customer_id: str
     first_name: str
     last_name: str
     email: str
     phone_number: str
     address: str
+    account_status: str
     date_joined: datetime
-    
+
+
+class CustomerCreate(BaseModel):
+    customer_id: str
+    first_name: str
+    last_name: str
+    email: str
+    phone_number: str
+    address: str
     account_status: str
 
 
-class EnergyUsage(BaseModel):
+class CustomerUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    account_status: Optional[str] = None
+    date_joined: Optional[datetime] = None
 
+
+class EnergyUsage(BaseModel):
     customer_id: str
     date: datetime
     usage_kwh: float
     peak_demand_kwh: Optional[float] = None
     total_charge: float
-    energy_type: str
+    energy_type: Optional[str] = None
 
 
 class CustomerTicket(BaseModel):
-
     ticket_id: str
     customer_id: str
     issue_type: str
@@ -93,114 +83,111 @@ class CustomerTicket(BaseModel):
     resolution_method: Optional[str] = None
 
 
-#STEP7 BUILDING API GET ENDPOINTS
-
-@app.get(
-    "/customers/{customer_id}",
-    response_model=Customer,
-    tags=["Customers"]
-)
-def get_customer_info(customer_id: str):
-
-    customer_row = customer_info_df[
-        customer_info_df["Customer_ID"] == customer_id
-    ]
-
-    if customer_row.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
-
-    customer = customer_row.iloc[0]
-
-    return {
-        "customer_id": customer["Customer_ID"],
-        "first_name": customer["First_Name"],
-        "last_name": customer["Last_Name"],
-        "email": customer["Email"],
-        "phone_number": customer["Phone_Number"],
-        "address": customer["Address"],
-        "date_joined": customer["Date_Joined"],
-        "account_status": customer["Account_Status"]
-    }
+class Customer360Summary(BaseModel):
+    lifetime_kwh: float
+    lifetime_spend: float
+    total_support_tickets: int
 
 
-@app.get(
-    "/energy-usage/{customer_id}",
-    response_model=List[EnergyUsage],
-    tags=["Energy Usage"]
-)
+class Customer360Response(BaseModel):
+    profile: Customer
+    energy_last_30_days: List[EnergyUsage]
+    support_tickets: List[CustomerTicket]
+    summary: Customer360Summary
+
+
+# =========================
+# GET CUSTOMER
+# =========================
+
+@app.get("/customers/{customer_id}", response_model=Customer)
+def get_customer(customer_id: str):
+
+    customer = customer_df[customer_df["Customer_ID"] == customer_id]
+
+    if customer.empty:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    row = customer.iloc[0]
+
+    return Customer(
+        customer_id=row["Customer_ID"],
+        first_name=row["First_Name"],
+        last_name=row["Last_Name"],
+        email=row["Email"],
+        phone_number=row["Phone_Number"],
+        address=row["Address"],
+        account_status=row["Account_Status"],
+        date_joined=row["Date_Joined"]
+    )
+
+
+# =========================
+# GET ENERGY USAGE
+# =========================
+
+@app.get("/energy-usage/{customer_id}", response_model=List[EnergyUsage])
 def get_energy_usage(customer_id: str):
 
-    customer_energy = energy_usage_df[
-        energy_usage_df["Customer_ID"] == customer_id
-    ].copy()
+    customer_energy = energy_df[energy_df["Customer_ID"] == customer_id]
 
     if customer_energy.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
+        raise HTTPException(status_code=404, detail=f"No energy usage found for '{customer_id}'.")
 
-    last_30_days = datetime.now() - timedelta(days=30)
+    cutoff = energy_df["Date"].max() - timedelta(days=30)
+    recent_energy_data = customer_energy[customer_energy["Date"] >= cutoff].copy()
 
-    recent_customer_energy = customer_energy[
-        customer_energy["Date"] >= last_30_days
-    ].copy()
+    # Ensure optional columns exist
+    if "Peak_Demand_kWh" not in recent_energy_data.columns:
+        recent_energy_data["Peak_Demand_kWh"] = None
 
-    recent_customer_energy.loc[:, "Peak_Demand_kWh"] = (
-        recent_customer_energy["Peak_Demand_kWh"]
-        .where(
-            pd.notna(recent_customer_energy["Peak_Demand_kWh"]),
-            None
-        )
+    recent_energy_data["Peak_Demand_kWh"] = (
+        recent_energy_data["Peak_Demand_kWh"]
+        .where(recent_energy_data["Peak_Demand_kWh"].notna(), None)
+    )
+
+    if "Energy_Type" not in recent_energy_data.columns:
+        recent_energy_data["Energy_Type"] = None
+
+    recent_energy_data["Energy_Type"] = (
+        recent_energy_data["Energy_Type"]
+        .where(recent_energy_data["Energy_Type"].notna(), None)
     )
 
     return [
         EnergyUsage(
             customer_id=row["Customer_ID"],
             date=row["Date"],
-            usage_kwh=row["Usage_KWh"],
-            peak_demand_kwh=row["Peak_Demand_KWh"],
+            usage_kwh=row["Usage_kWh"],            # FIXED
+            peak_demand_kwh=row["Peak_Demand_kWh"], # FIXED
             total_charge=row["Total_Charge"],
             energy_type=row["Energy_Type"]
         )
-        for _, row in recent_customer_energy.iterrows()
+        for _, row in recent_energy_data.iterrows()
     ]
 
 
-@app.get(
-    "/support-tickets/{customer_id}",
-    response_model=List[CustomerTicket],
-    tags=["Support Tickets"]
-)
+# =========================
+# GET SUPPORT TICKETS
+# =========================
+
+@app.get("/support-tickets/{customer_id}", response_model=List[CustomerTicket])
 def get_support_tickets(customer_id: str):
 
-    customer_ticket = customer_tickets_df[
-        customer_tickets_df["Customer_ID"] == customer_id
-    ].copy()
+    support_ticket = ticket_df[ticket_df["Customer_ID"] == customer_id].copy()
 
-    if customer_ticket.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
+    if support_ticket.empty:
+        raise HTTPException(status_code=404, detail="No tickets found")
 
-    customer_ticket.loc[:, "Date_Closed"] = (
-        customer_ticket["Date_Closed"]
-        .where(
-            pd.notna(customer_ticket["Date_Closed"]),
-            None
-        )
+    if "Resolution_Method" not in support_ticket.columns:
+        support_ticket["Resolution_Method"] = None
+
+    support_ticket["Date_Closed"] = support_ticket["Date_Closed"].where(
+        support_ticket["Date_Closed"].notna(), None
     )
 
-    customer_ticket.loc[:, "Resolution_Method"] = (
-        customer_ticket["Resolution_Method"]
-        .where(
-            pd.notna(customer_ticket["Resolution_Method"]),
-            None
-        )
+    support_ticket["Resolution_Method"] = support_ticket["Resolution_Method"].where(
+        support_ticket["Resolution_Method"].notna(), None
     )
 
     return [
@@ -213,466 +200,165 @@ def get_support_tickets(customer_id: str):
             date_closed=row["Date_Closed"],
             resolution_method=row["Resolution_Method"]
         )
-        for _, row in customer_ticket.iterrows()
+        for _, row in support_ticket.iterrows()
     ]
 
 
-#STEP8 CUSTOMER360 ENDPOINT
+# =========================
+# CUSTOMER 360
+# =========================
 
-@app.get(
-    "/customer360/{customer_id}",
-    tags=["Customer360"]
-)
-def get_customer360(customer_id: str):
+@app.get("/customer-360/{customer_id}", response_model=Customer360Response)
+def customer_360(customer_id: str):
 
-    customer_row = customer_info_df[
-        customer_info_df["Customer_ID"] == customer_id
-    ]
+    cust = customer_df[customer_df["Customer_ID"] == customer_id]
 
-    if customer_row.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
+    if cust.empty:
+        raise HTTPException(status_code=404, detail="Customer not found")
 
-    customer = customer_row.iloc[0]
+    row = cust.iloc[0]
 
-    #ENERGY USAGE
+    energy_all = energy_df[energy_df["Customer_ID"] == customer_id]
+    tickets_all = ticket_df[ticket_df["Customer_ID"] == customer_id]
 
-    customer_energy = energy_usage_df[
-        energy_usage_df["Customer_ID"] == customer_id
-    ].copy()
+    cutoff = datetime.now() - timedelta(days=30)
+    energy_30 = energy_all[energy_all["Date"] >= cutoff].copy()
 
-    last_30_days = datetime.now() - timedelta(days=30)
+    if "Peak_Demand_kWh" not in energy_all.columns:
+        energy_all["Peak_Demand_kWh"] = None
+        energy_30["Peak_Demand_kWh"] = None
 
-    recent_energy = customer_energy[
-        customer_energy["Date"] >= last_30_days
-    ].copy()
+    if "Energy_Type" not in energy_all.columns:
+        energy_all["Energy_Type"] = None
+        energy_30["Energy_Type"] = None
 
-    recent_energy.loc[:, "Peak_Demand_KWh"] = (
-        recent_energy["Peak_Demand_KWh"]
-        .where(
-            pd.notna(recent_energy["Peak_Demand_KWh"]),
-            None
-        )
+    if "Resolution_Method" not in tickets_all.columns:
+        tickets_all["Resolution_Method"] = None
+
+    summary = Customer360Summary(
+        lifetime_kwh=float(energy_all["Usage_kWh"].sum()),   # FIXED
+        lifetime_spend=float(energy_all["Total_Charge"].sum()),
+        total_support_tickets=len(tickets_all)
     )
 
-    energy_list = [
-        {
-            "customer_id": row["Customer_ID"],
-            "date": row["Date"],
-            "usage_kwh": row["Usage_KWh"],
-            "peak_demand_kwh": row["Peak_Demand_KWh"],
-            "total_charge": row["Total_Charge"],
-            "energy_type": row["Energy_Type"]
-        }
-        for _, row in recent_energy.iterrows()
-    ]
-
-    #SUPPORT TICKETS
-
-    tickets = customer_tickets_df[
-        customer_tickets_df["Customer_ID"] == customer_id
-    ].copy()
-
-    tickets.loc[:, "Date_Closed"] = (
-        tickets["Date_Closed"]
-        .where(
-            pd.notna(tickets["Date_Closed"]),
-            None
-        )
-    )
-
-    tickets.loc[:, "Resolution_Method"] = (
-        tickets["Resolution_Method"]
-        .where(
-            pd.notna(tickets["Resolution_Method"]),
-            None
-        )
-    )
-
-    ticket_list = [
-        {
-            "ticket_id": row["Ticket_ID"],
-            "customer_id": row["Customer_ID"],
-            "issue_type": row["Issue_Type"],
-            "ticket_status": row["Ticket_Status"],
-            "date_opened": row["Date_Opened"],
-            "date_closed": row["Date_Closed"],
-            "resolution_method": row["Resolution_Method"]
-        }
-        for _, row in tickets.iterrows()
-    ]
-
-    #METRICS
-
-    metrics = {
-        "total_kwh_30_days": float(
-            recent_energy["Usage_KWh"].sum()
+    return Customer360Response(
+        profile=Customer(
+            customer_id=row["Customer_ID"],
+            first_name=row["First_Name"],
+            last_name=row["Last_Name"],
+            email=row["Email"],
+            phone_number=row["Phone_Number"],
+            address=row["Address"],
+            account_status=row["Account_Status"],
+            date_joined=row["Date_Joined"]
         ),
+        energy_last_30_days=[
+            EnergyUsage(
+                customer_id=r["Customer_ID"],
+                date=r["Date"],
+                usage_kwh=r["Usage_kWh"],             # FIXED
+                peak_demand_kwh=r["Peak_Demand_kWh"], # FIXED
+                total_charge=r["Total_Charge"],
+                energy_type=r["Energy_Type"]
+            )
+            for _, r in energy_30.iterrows()
+        ],
+        support_tickets=[
+            CustomerTicket(
+                ticket_id=r["Ticket_ID"],
+                customer_id=r["Customer_ID"],
+                issue_type=r["Issue_Type"],
+                ticket_status=r["Ticket_Status"],
+                date_opened=r["Date_Opened"],
+                date_closed=r["Date_Closed"],
+                resolution_method=r["Resolution_Method"]
+            )
+            for _, r in tickets_all.iterrows()
+        ],
+        summary=summary
+    )
 
-        "avg_daily_kwh": (
-            float(recent_energy["Usage_KWh"].mean())
-            if not recent_energy.empty else 0
-        ),
 
-        "open_ticket_count": int(
-            (tickets["Ticket_Status"] == "Open").sum()
-        ),
+# =========================
+# CREATE CUSTOMER
+# =========================
 
-        "lifetime_ticket_count": int(
-            len(tickets)
-        )
+@app.post("/customers")
+def create_customer(customer: CustomerCreate):
+
+    global customer_df
+
+    if (customer_df["Customer_ID"] == customer.customer_id).any():
+        raise HTTPException(status_code=400, detail="Customer already exists")
+
+    new_row = pd.DataFrame([{
+        "Customer_ID": customer.customer_id,
+        "First_Name": customer.first_name,
+        "Last_Name": customer.last_name,
+        "Email": customer.email,
+        "Phone_Number": customer.phone_number,
+        "Address": customer.address,
+        "Account_Status": customer.account_status,
+        "Date_Joined": datetime.now()
+    }])
+
+    customer_df = pd.concat([customer_df, new_row], ignore_index=True)
+    customer_df.to_csv(CUSTOMER_FILE, index=False)
+
+    return {"message": "created", "customer_id": customer.customer_id}
+
+
+# =========================
+# UPDATE CUSTOMER
+# =========================
+
+@app.put("/customers/{customer_id}")
+def update_customer(customer_id: str, update: CustomerUpdate):
+
+    global customer_df
+
+    idx = customer_df.index[customer_df["Customer_ID"] == customer_id]
+
+    if len(idx) == 0:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    i = idx[0]
+
+    mapping = {
+        "first_name": "First_Name",
+        "last_name": "Last_Name",
+        "email": "Email",
+        "phone_number": "Phone_Number",
+        "address": "Address",
+        "account_status": "Account_Status",
+        "date_joined": "Date_Joined"
     }
 
-    return {
+    for field, value in update.dict(exclude_unset=True).items():
+        col = mapping.get(field)
+        if col:
+            customer_df.at[i, col] = value
 
-        "customer": {
-            "customer_id": customer["Customer_ID"],
-            "first_name": customer["First_Name"],
-            "last_name": customer["Last_Name"],
-            "email": customer["Email"],
-            "phone_number": customer["Phone_Number"],
-            "address": customer["Address"],
-            "date_joined": customer["Date_Joined"],
-            "account_status": customer["Account_Status"]
-        },
+    customer_df.to_csv(CUSTOMER_FILE, index=False)
 
-        "energy_usage_last_30_days": energy_list,
+    return {"message": "updated"}
 
-        "support_tickets": ticket_list,
 
-        "metrics": metrics
-    }
+# =========================
+# DELETE CUSTOMER
+# =========================
 
-
-#STEP9 API POST ENDPOINTS
-
-@app.post(
-    "/customers",
-    response_model=Customer,
-    status_code=201,
-    tags=["Customers"]
-)
-def create_customer(new_customer: Customer):
-
-    global customer_info_df
-
-    #CHECK CUSTOMER ID
-
-    existing_customer = customer_info_df[
-        customer_info_df["Customer_ID"] == new_customer.customer_id
-    ]
-
-    if not existing_customer.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="customer already exists"
-        )
-
-    #CHECK EMAIL
-
-    existing_email = customer_info_df[
-        customer_info_df["Email"] == new_customer.email
-    ]
-
-    if not existing_email.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="email already exists"
-        )
-
-    #CREATE NEW ROW
-
-    new_row = {
-        "Customer_ID": new_customer.customer_id,
-        "First_Name": new_customer.first_name,
-        "Last_Name": new_customer.last_name,
-        "Email": new_customer.email,
-        "Phone_Number": new_customer.phone_number,
-        "Address": new_customer.address,
-        "Date_Joined": new_customer.date_joined,
-        "Account_Status": new_customer.account_status
-    }
-
-    #APPEND DATAFRAME
-
-    customer_info_df = pd.concat(
-        [customer_info_df, pd.DataFrame([new_row])],
-        ignore_index=True
-    )
-
-    #SAVE CSV
-
-    customer_info_df.to_csv(
-        CUSTOMER_FILE,
-        index=False
-    )
-
-    return new_customer
-
-
-@app.post(
-    "/energy-usage",
-    response_model=EnergyUsage,
-    status_code=201,
-    tags=["Energy Usage"]
-)
-def create_energy_usage(new_energy_usage: EnergyUsage):
-
-    global energy_usage_df
-
-    #CHECK CUSTOMER EXISTS
-
-    customer_exists = customer_info_df[
-        customer_info_df["Customer_ID"] == new_energy_usage.customer_id
-    ]
-
-    if customer_exists.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
-
-    #CREATE NEW ROW
-
-    new_row = {
-        "Customer_ID": new_energy_usage.customer_id,
-        "Date": new_energy_usage.date,
-        "Usage_KWh": new_energy_usage.usage_kwh,
-        "Peak_Demand_KWh": new_energy_usage.peak_demand_kwh,
-        "Total_Charge": new_energy_usage.total_charge,
-        "Energy_Type": new_energy_usage.energy_type
-    }
-
-    #APPEND DATAFRAME
-
-    energy_usage_df = pd.concat(
-        [energy_usage_df, pd.DataFrame([new_row])],
-        ignore_index=True
-    )
-
-    #SAVE CSV
-
-    energy_usage_df.to_csv(
-        ENERGY_FILE,
-        index=False
-    )
-
-    return new_energy_usage
-
-
-@app.post(
-    "/support-tickets",
-    response_model=CustomerTicket,
-    status_code=201,
-    tags=["Support Tickets"]
-)
-def create_support_ticket(new_ticket: CustomerTicket):
-
-    global customer_tickets_df
-
-    #CHECK CUSTOMER EXISTS
-
-    customer_exists = customer_info_df[
-        customer_info_df["Customer_ID"] == new_ticket.customer_id
-    ]
-
-    if customer_exists.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
-
-    #CHECK TICKET EXISTS
-
-    existing_ticket = customer_tickets_df[
-        customer_tickets_df["Ticket_ID"] == new_ticket.ticket_id
-    ]
-
-    if not existing_ticket.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="ticket already exists"
-        )
-
-    #CREATE NEW ROW
-
-    new_row = {
-        "Ticket_ID": new_ticket.ticket_id,
-        "Customer_ID": new_ticket.customer_id,
-        "Issue_Type": new_ticket.issue_type,
-        "Ticket_Status": new_ticket.ticket_status,
-        "Date_Opened": new_ticket.date_opened,
-        "Date_Closed": new_ticket.date_closed,
-        "Resolution_Method": new_ticket.resolution_method
-    }
-
-    #APPEND DATAFRAME
-
-    customer_tickets_df = pd.concat(
-        [customer_tickets_df, pd.DataFrame([new_row])],
-        ignore_index=True
-    )
-
-    #SAVE CSV
-
-    customer_tickets_df.to_csv(
-        TICKET_FILE,
-        index=False
-    )
-
-    return new_ticket
-
-
-#STEP10 API PUT ENDPOINT
-
-@app.put(
-    "/customers/{customer_id}",
-    response_model=Customer,
-    tags=["Customers"]
-)
-def update_customer(
-    customer_id: str,
-    updated_customer: Customer
-):
-
-    global customer_info_df
-
-    #CHECK CUSTOMER EXISTS
-
-    customer_index = customer_info_df[
-        customer_info_df["Customer_ID"] == customer_id
-    ].index
-
-    if len(customer_index) == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
-
-    #CHECK CUSTOMER ID MATCH
-
-    if updated_customer.customer_id != customer_id:
-        raise HTTPException(
-            status_code=400,
-            detail="customer_id mismatch"
-        )
-
-    #UPDATE RECORD
-
-    customer_info_df.loc[
-        customer_index,
-        "First_Name"
-    ] = updated_customer.first_name
-
-    customer_info_df.loc[
-        customer_index,
-        "Last_Name"
-    ] = updated_customer.last_name
-
-    customer_info_df.loc[
-        customer_index,
-        "Email"
-    ] = updated_customer.email
-
-    customer_info_df.loc[
-        customer_index,
-        "Phone_Number"
-    ] = updated_customer.phone_number
-
-    customer_info_df.loc[
-        customer_index,
-        "Address"
-    ] = updated_customer.address
-
-    customer_info_df.loc[
-        customer_index,
-        "Date_Joined"
-    ] = updated_customer.date_joined
-
-    customer_info_df.loc[
-        customer_index,
-        "Account_Status"
-    ] = updated_customer.account_status
-
-    #SAVE CSV
-
-    customer_info_df.to_csv(
-        CUSTOMER_FILE,
-        index=False
-    )
-
-    updated_row = customer_info_df.loc[
-        customer_index
-    ].iloc[0]
-
-    return {
-        "customer_id": updated_row["Customer_ID"],
-        "first_name": updated_row["First_Name"],
-        "last_name": updated_row["Last_Name"],
-        "email": updated_row["Email"],
-        "phone_number": updated_row["Phone_Number"],
-        "address": updated_row["Address"],
-        "date_joined": updated_row["Date_Joined"],
-        "account_status": updated_row["Account_Status"]
-    }
-
-
-#STEP11 API DELETE ENDPOINT
-
-@app.delete(
-    "/customers/{customer_id}",
-    tags=["Customers"]
-)
+@app.delete("/customers/{customer_id}")
 def delete_customer(customer_id: str):
 
-    global customer_info_df
-    global energy_usage_df
-    global customer_tickets_df
+    global customer_df
 
-    #CHECK CUSTOMER EXISTS
+    before = len(customer_df)
+    customer_df = customer_df[customer_df["Customer_ID"] != customer_id]
 
-    customer_exists = customer_info_df[
-        customer_info_df["Customer_ID"] == customer_id
-    ]
+    if len(customer_df) == before:
+        raise HTTPException(status_code=404, detail="Customer not found")
 
-    if customer_exists.empty:
-        raise HTTPException(
-            status_code=404,
-            detail="customer not found"
-        )
+    customer_df.to_csv(CUSTOMER_FILE, index=False)
 
-    #SOFT DELETE CUSTOMER
-
-    customer_index = customer_info_df[
-        customer_info_df["Customer_ID"] == customer_id
-    ].index
-
-    customer_info_df.loc[
-        customer_index,
-        "Account_Status"
-    ] = "Deleted"
-
-    #SAVE CSV
-
-    customer_info_df.to_csv(
-        CUSTOMER_FILE,
-        index=False
-    )
-
-    return {
-        "message": f"customer {customer_id} soft deleted successfully"
-    }
-
-
-#STEP12 RUN APPLICATION
-
-if __name__ == "__main__":
-
-    uvicorn.run(
-        "main:app",
-        host="127.0.0.1",
-        port=8000,
-        reload=True
-    )
+    return {"message": "deleted"}
